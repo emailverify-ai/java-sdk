@@ -14,17 +14,30 @@ Official EmailVerify Java SDK for email verification.
 ### Maven
 
 ```xml
+<repositories>
+    <repository>
+        <id>jitpack.io</id>
+        <url>https://jitpack.io</url>
+    </repository>
+</repositories>
+
 <dependency>
-    <groupId>com.emailverify</groupId>
-    <artifactId>emailverify-java</artifactId>
-    <version>1.0.0</version>
+    <groupId>com.github.emailverify-ai</groupId>
+    <artifactId>java-sdk</artifactId>
+    <version>v1.0.0</version>
 </dependency>
 ```
 
 ### Gradle
 
 ```groovy
-implementation 'com.emailverify:emailverify-java:1.0.0'
+repositories {
+    maven { url 'https://jitpack.io' }
+}
+
+dependencies {
+    implementation 'com.github.emailverify-ai:java-sdk:v1.0.0'
+}
 ```
 
 ## Quick Start
