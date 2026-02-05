@@ -11,3 +11,7 @@ target/
 
 # Logs
 *.log
+
+# Maven temp files
+cp.txt
+dependency-reduced-pom.xml

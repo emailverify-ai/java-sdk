@@ -64,24 +64,48 @@ class EmailVerifyClientTest {
     }
 
     @Test
+    void healthCheck() throws Exception {
+        String responseBody = """
+            {
+                "status": "ok",
+                "time": 1705319400
+            }
+            """;
+
+        mockServer.enqueue(new MockResponse()
+            .setBody(responseBody)
+            .setHeader("Content-Type", "application/json"));
+
+        HealthResponse result = client.healthCheck();
+
+        assertEquals("ok", result.status());
+        assertEquals(1705319400, result.time());
+
+        RecordedRequest request = mockServer.takeRequest();
+        assertEquals("GET", request.getMethod());
+        assertEquals("/health", request.getPath());
+        // Health check should not require auth
+        assertNull(request.getHeader("EV-API-KEY"));
+    }
+
+    @Test
     void verifySuccess() throws Exception {
         String responseBody = """
             {
                 "email": "test@example.com",
                 "status": "valid",
-                "result": {
-                    "deliverable": true,
-                    "valid_format": true,
-                    "valid_domain": true,
-                    "valid_mx": true,
-                    "disposable": false,
-                    "role": false,
-                    "catchall": false,
-                    "free": false,
-                    "smtp_valid": true
-                },
                 "score": 0.95,
-                "reason": null,
+                "is_deliverable": true,
+                "is_disposable": false,
+                "is_catchall": false,
+                "is_role": false,
+                "is_free": false,
+                "domain": "example.com",
+                "domain_age": 10,
+                "mx_records": ["mail.example.com"],
+                "smtp_check": true,
+                "reason": "accepted",
+                "response_time": 250,
                 "credits_used": 1
             }
             """;
@@ -93,15 +117,18 @@ class EmailVerifyClientTest {
         VerifyResponse result = client.verify("test@example.com");
 
         assertEquals("test@example.com", result.email());
-        assertEquals("valid", result.status());
+        assertEquals(Status.VALID, result.status());
         assertEquals(0.95, result.score());
-        assertTrue(result.result().deliverable());
-        assertFalse(result.result().disposable());
+        assertTrue(result.isDeliverable());
+        assertFalse(result.isDisposable());
+        assertEquals("example.com", result.domain());
+        assertEquals(10, result.domainAge());
+        assertEquals(List.of("mail.example.com"), result.mxRecords());
 
         RecordedRequest request = mockServer.takeRequest();
         assertEquals("POST", request.getMethod());
-        assertEquals("/verify", request.getPath());
-        assertEquals("test-api-key", request.getHeader("EMAILVERIFY-API-KEY"));
+        assertEquals("/v1/verify/single", request.getPath());
+        assertEquals("test-api-key", request.getHeader("EV-API-KEY"));
     }
 
     @Test
@@ -110,8 +137,12 @@ class EmailVerifyClientTest {
             {
                 "email": "test@example.com",
                 "status": "valid",
-                "result": {},
                 "score": 0.95,
+                "is_deliverable": true,
+                "is_disposable": false,
+                "is_catchall": false,
+                "is_role": false,
+                "is_free": false,
                 "credits_used": 1
             }
             """;
@@ -120,12 +151,11 @@ class EmailVerifyClientTest {
             .setBody(responseBody)
             .setHeader("Content-Type", "application/json"));
 
-        client.verify("test@example.com", false, 5000);
+        client.verify("test@example.com", false);
 
         RecordedRequest request = mockServer.takeRequest();
         String body = request.getBody().readUtf8();
-        assertTrue(body.contains("\"smtp_check\":false"));
-        assertTrue(body.contains("\"timeout\":5000"));
+        assertTrue(body.contains("\"check_smtp\":false"));
     }
 
     @Test
@@ -182,7 +212,7 @@ class EmailVerifyClientTest {
             """;
 
         mockServer.enqueue(new MockResponse()
-            .setResponseCode(403)
+            .setResponseCode(402)
             .setBody(responseBody)
             .setHeader("Content-Type", "application/json"));
 
@@ -213,17 +243,90 @@ class EmailVerifyClientTest {
     }
 
     @Test
-    void verifyBulkSuccess() throws Exception {
+    void verifyBatchSuccess() throws Exception {
+        String responseBody = """
+            {
+                "results": [
+                    {
+                        "email": "user1@example.com",
+                        "status": "valid",
+                        "score": 0.95,
+                        "is_deliverable": true,
+                        "is_disposable": false,
+                        "is_catchall": false,
+                        "is_role": false,
+                        "is_free": false,
+                        "credits_used": 1
+                    },
+                    {
+                        "email": "user2@example.com",
+                        "status": "invalid",
+                        "score": 0.0,
+                        "is_deliverable": false,
+                        "is_disposable": false,
+                        "is_catchall": false,
+                        "is_role": false,
+                        "is_free": false,
+                        "credits_used": 0
+                    }
+                ],
+                "total_emails": 2,
+                "valid_emails": 1,
+                "invalid_emails": 1,
+                "credits_used": 1,
+                "process_time": 1500
+            }
+            """;
+
+        mockServer.enqueue(new MockResponse()
+            .setBody(responseBody)
+            .setHeader("Content-Type", "application/json"));
+
+        BatchVerifyResponse result = client.verifyBatch(List.of(
+            "user1@example.com",
+            "user2@example.com"
+        ));
+
+        assertEquals(2, result.totalEmails());
+        assertEquals(1, result.validEmails());
+        assertEquals(1, result.invalidEmails());
+        assertEquals(2, result.results().size());
+        assertEquals("user1@example.com", result.results().get(0).email());
+        assertEquals(Status.VALID, result.results().get(0).status());
+
+        RecordedRequest request = mockServer.takeRequest();
+        assertEquals("POST", request.getMethod());
+        assertEquals("/v1/verify/bulk", request.getPath());
+        String body = request.getBody().readUtf8();
+        assertTrue(body.contains("\"check_smtp\":true"));
+    }
+
+    @Test
+    void verifyBatchTooManyEmails() {
+        List<String> emails = java.util.Collections.nCopies(51, "test@example.com");
+
+        assertThrows(ValidationException.class, () ->
+            client.verifyBatch(emails)
+        );
+    }
+
+    @Test
+    void getFileJobStatus() throws Exception {
         String responseBody = """
             {
                 "job_id": "job_123",
                 "status": "processing",
-                "total": 3,
-                "processed": 0,
-                "valid": 0,
-                "invalid": 0,
-                "unknown": 0,
-                "credits_used": 3,
+                "file_name": "emails.csv",
+                "total_emails": 100,
+                "processed_emails": 50,
+                "progress_percent": 50,
+                "valid_emails": 40,
+                "invalid_emails": 5,
+                "unknown_emails": 5,
+                "role_emails": 0,
+                "catchall_emails": 0,
+                "disposable_emails": 0,
+                "credits_used": 50,
                 "created_at": "2025-01-15T10:30:00Z"
             }
             """;
@@ -232,72 +335,35 @@ class EmailVerifyClientTest {
             .setBody(responseBody)
             .setHeader("Content-Type", "application/json"));
 
-        BulkJobResponse result = client.verifyBulk(List.of(
-            "user1@example.com",
-            "user2@example.com",
-            "user3@example.com"
-        ));
-
-        assertEquals("job_123", result.jobId());
-        assertEquals("processing", result.status());
-        assertEquals(3, result.total());
-    }
-
-    @Test
-    void verifyBulkTooManyEmails() {
-        List<String> emails = java.util.Collections.nCopies(10001, "test@example.com");
-
-        assertThrows(ValidationException.class, () ->
-            client.verifyBulk(emails)
-        );
-    }
-
-    @Test
-    void getBulkJobStatus() throws Exception {
-        String responseBody = """
-            {
-                "job_id": "job_123",
-                "status": "processing",
-                "total": 100,
-                "processed": 50,
-                "valid": 40,
-                "invalid": 5,
-                "unknown": 5,
-                "credits_used": 100,
-                "created_at": "2025-01-15T10:30:00Z",
-                "progress_percent": 50
-            }
-            """;
-
-        mockServer.enqueue(new MockResponse()
-            .setBody(responseBody)
-            .setHeader("Content-Type", "application/json"));
-
-        BulkJobResponse result = client.getBulkJobStatus("job_123");
+        FileJobResponse result = client.getFileJobStatus("job_123");
 
         assertEquals("job_123", result.jobId());
         assertEquals(50, result.progressPercent());
+        assertEquals("emails.csv", result.fileName());
 
         RecordedRequest request = mockServer.takeRequest();
-        assertEquals("/verify/bulk/job_123", request.getPath());
+        assertEquals("/v1/verify/file/job_123", request.getPath());
     }
 
     @Test
-    void getBulkJobResults() throws Exception {
+    void getFileJobStatusWithTimeout() throws Exception {
         String responseBody = """
             {
                 "job_id": "job_123",
-                "total": 100,
-                "limit": 50,
-                "offset": 0,
-                "results": [
-                    {
-                        "email": "test@example.com",
-                        "status": "valid",
-                        "result": {"deliverable": true},
-                        "score": 0.95
-                    }
-                ]
+                "status": "completed",
+                "file_name": "emails.csv",
+                "total_emails": 100,
+                "processed_emails": 100,
+                "progress_percent": 100,
+                "valid_emails": 90,
+                "invalid_emails": 10,
+                "unknown_emails": 0,
+                "role_emails": 0,
+                "catchall_emails": 0,
+                "disposable_emails": 0,
+                "credits_used": 100,
+                "created_at": "2025-01-15T10:30:00Z",
+                "completed_at": "2025-01-15T10:35:00Z"
             }
             """;
 
@@ -305,31 +371,32 @@ class EmailVerifyClientTest {
             .setBody(responseBody)
             .setHeader("Content-Type", "application/json"));
 
-        BulkResultsResponse result = client.getBulkJobResults("job_123", 50, 0, "valid");
+        FileJobResponse result = client.getFileJobStatus("job_123", 60);
 
-        assertEquals("job_123", result.jobId());
-        assertEquals(1, result.results().size());
-        assertEquals("test@example.com", result.results().get(0).email());
+        assertEquals("completed", result.status());
 
         RecordedRequest request = mockServer.takeRequest();
-        assertTrue(request.getPath().contains("limit=50"));
-        assertTrue(request.getPath().contains("offset=0"));
-        assertTrue(request.getPath().contains("status=valid"));
+        assertTrue(request.getPath().contains("timeout=60"));
+    }
+
+    @Test
+    void getFileJobStatusTimeoutValidation() {
+        assertThrows(ValidationException.class, () ->
+            client.getFileJobStatus("job_123", 301)
+        );
     }
 
     @Test
     void getCredits() throws Exception {
         String responseBody = """
             {
-                "available": 9500,
-                "used": 500,
-                "total": 10000,
-                "plan": "Professional",
-                "resets_at": "2025-02-01T00:00:00Z",
-                "rate_limit": {
-                    "requests_per_hour": 10000,
-                    "remaining": 9850
-                }
+                "account_id": "abc123",
+                "api_key_id": "key_xyz",
+                "api_key_name": "Default API Key",
+                "credits_balance": 9500,
+                "credits_consumed": 500,
+                "credits_added": 10000,
+                "last_updated": "2025-01-15T10:30:00Z"
             }
             """;
 
@@ -339,9 +406,12 @@ class EmailVerifyClientTest {
 
         CreditsResponse result = client.getCredits();
 
-        assertEquals(9500, result.available());
-        assertEquals("Professional", result.plan());
-        assertEquals(9850, result.rateLimit().remaining());
+        assertEquals("abc123", result.accountId());
+        assertEquals("key_xyz", result.apiKeyId());
+        assertEquals("Default API Key", result.apiKeyName());
+        assertEquals(9500, result.creditsBalance());
+        assertEquals(500, result.creditsConsumed());
+        assertEquals(10000, result.creditsAdded());
     }
 
     @Test
@@ -350,8 +420,11 @@ class EmailVerifyClientTest {
             {
                 "id": "webhook_123",
                 "url": "https://example.com/webhook",
-                "events": ["verification.completed"],
-                "created_at": "2025-01-15T10:30:00Z"
+                "events": ["file.completed", "file.failed"],
+                "secret": "secret_abc123",
+                "is_active": true,
+                "created_at": "2025-01-15T10:30:00Z",
+                "updated_at": "2025-01-15T10:30:00Z"
             }
             """;
 
@@ -361,12 +434,19 @@ class EmailVerifyClientTest {
 
         Webhook result = client.createWebhook(
             "https://example.com/webhook",
-            List.of("verification.completed"),
-            "secret"
+            List.of(WebhookEvent.FILE_COMPLETED, WebhookEvent.FILE_FAILED)
         );
 
         assertEquals("webhook_123", result.id());
         assertEquals("https://example.com/webhook", result.url());
+        assertEquals("secret_abc123", result.secret());
+        assertTrue(result.isActive());
+        assertEquals(List.of("file.completed", "file.failed"), result.events());
+
+        // Verify request does not include secret
+        RecordedRequest request = mockServer.takeRequest();
+        String body = request.getBody().readUtf8();
+        assertFalse(body.contains("\"secret\""));
     }
 
     @Test
@@ -376,8 +456,10 @@ class EmailVerifyClientTest {
                 {
                     "id": "webhook_123",
                     "url": "https://example.com/webhook",
-                    "events": ["verification.completed"],
-                    "created_at": "2025-01-15T10:30:00Z"
+                    "events": ["file.completed"],
+                    "is_active": true,
+                    "created_at": "2025-01-15T10:30:00Z",
+                    "updated_at": "2025-01-15T10:30:00Z"
                 }
             ]
             """;
@@ -390,6 +472,7 @@ class EmailVerifyClientTest {
 
         assertEquals(1, result.size());
         assertEquals("webhook_123", result.get(0).id());
+        assertTrue(result.get(0).isActive());
     }
 
     @Test
@@ -400,7 +483,7 @@ class EmailVerifyClientTest {
 
         RecordedRequest request = mockServer.takeRequest();
         assertEquals("DELETE", request.getMethod());
-        assertEquals("/webhooks/webhook_123", request.getPath());
+        assertEquals("/v1/webhooks/webhook_123", request.getPath());
     }
 
     @Test
@@ -424,6 +507,47 @@ class EmailVerifyClientTest {
         boolean result = EmailVerifyClient.verifyWebhookSignature(payload, signature, secret);
 
         assertFalse(result);
+    }
+
+    @Test
+    void resultFiltersBuilder() {
+        ResultFilters filters = ResultFilters.builder()
+            .valid(true)
+            .invalid(true)
+            .risky(true)
+            .build();
+
+        assertTrue(filters.valid());
+        assertTrue(filters.invalid());
+        assertTrue(filters.risky());
+        assertNull(filters.catchall());
+        assertNull(filters.role());
+    }
+
+    @Test
+    void getFileResultsUrlWithFilters() throws Exception {
+        ResultFilters filters = ResultFilters.builder()
+            .valid(true)
+            .invalid(true)
+            .build();
+
+        String url = client.getFileResultsUrl("job_123", filters);
+
+        assertTrue(url.contains("/v1/verify/file/job_123/results"));
+        assertTrue(url.contains("valid=true"));
+        assertTrue(url.contains("invalid=true"));
+    }
+
+    @Test
+    void statusEnumFromValue() {
+        assertEquals(Status.VALID, Status.fromValue("valid"));
+        assertEquals(Status.INVALID, Status.fromValue("invalid"));
+        assertEquals(Status.UNKNOWN, Status.fromValue("unknown"));
+        assertEquals(Status.RISKY, Status.fromValue("risky"));
+        assertEquals(Status.DISPOSABLE, Status.fromValue("disposable"));
+        assertEquals(Status.CATCHALL, Status.fromValue("catchall"));
+        assertEquals(Status.ROLE, Status.fromValue("role"));
+        assertEquals(Status.UNKNOWN, Status.fromValue("unrecognized"));
     }
 }
 
@@ -453,7 +577,7 @@ class ExceptionTest {
     void insufficientCreditsException() {
         var error = new InsufficientCreditsException();
         assertEquals("INSUFFICIENT_CREDITS", error.getErrorCode());
-        assertEquals(403, error.getStatusCode());
+        assertEquals(402, error.getStatusCode());
     }
 
     @Test

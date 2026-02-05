@@ -6,6 +6,6 @@ public class InsufficientCreditsException extends EmailVerifyException {
     }
 
     public InsufficientCreditsException(String message) {
-        super(message, "INSUFFICIENT_CREDITS", 403);
+        super(message, "INSUFFICIENT_CREDITS", 402);
     }
 }
